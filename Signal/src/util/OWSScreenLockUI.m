@@ -32,6 +32,39 @@ NSString *NSStringForScreenLockUIState(ScreenLockUIState value)
 
 const UIWindowLevel UIWindowLevel_Background = -1.f;
 
+// OWSScreenBlockingWindow tries to become first responder
+// when presented to ensure that the input accessory is updated.
+@interface OWSScreenBlockingViewController : UIViewController
+
+@end
+
+#pragma mark -
+
+@implementation OWSScreenBlockingViewController
+
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+
+    [self becomeFirstResponder];
+}
+
+- (void)viewDidAppear:(BOOL)animated
+{
+    [super viewDidAppear:animated];
+
+    [self becomeFirstResponder];
+}
+
+- (BOOL)canBecomeFirstResponder
+{
+    return YES;
+}
+
+@end
+
+#pragma mark -
+
 @interface OWSScreenLockUI ()
 
 @property (nonatomic) UIWindow *screenBlockingWindow;
@@ -413,7 +446,7 @@ const UIWindowLevel UIWindowLevel_Background = -1.f;
     window.opaque = YES;
     window.backgroundColor = UIColor.ows_materialBlueColor;
 
-    UIViewController *viewController = [UIViewController new];
+    UIViewController *viewController = [OWSScreenBlockingViewController new];
     viewController.view.backgroundColor = UIColor.ows_materialBlueColor;
 
     UIView *rootView = viewController.view;
