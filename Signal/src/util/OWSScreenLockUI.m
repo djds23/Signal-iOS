@@ -42,20 +42,6 @@ const UIWindowLevel UIWindowLevel_Background = -1.f;
 
 @implementation OWSScreenBlockingViewController
 
-- (void)viewWillAppear:(BOOL)animated
-{
-    [super viewWillAppear:animated];
-
-    [self becomeFirstResponder];
-}
-
-- (void)viewDidAppear:(BOOL)animated
-{
-    [super viewDidAppear:animated];
-
-    [self becomeFirstResponder];
-}
-
 - (BOOL)canBecomeFirstResponder
 {
     return YES;
@@ -534,6 +520,7 @@ const UIWindowLevel UIWindowLevel_Background = -1.f;
         // Show the blocking window in front of the status bar.
         self.screenBlockingWindow.windowLevel = UIWindowLevelStatusBar + 1;
         self.rootWindow.hidden = YES;
+        [self.screenBlockingViewController becomeFirstResponder];
     } else {
         self.screenBlockingWindow.windowLevel = UIWindowLevel_Background;
         [self.rootWindow makeKeyAndVisible];
