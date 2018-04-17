@@ -919,7 +919,12 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
             }
 
             dispatch_async([OWSDispatch sendingQueue], ^{
-                [recipient save];
+                [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction * transaction) {
+                    [recipient saveWithTransaction:transaction];
+                    [message updateWithState:OWSOutgoingMessageStateSentToService
+                              forRecipientId:recipient.uniqueId];
+                }];
+
                 [self handleMessageSentLocally:message];
                 successHandler();
             });

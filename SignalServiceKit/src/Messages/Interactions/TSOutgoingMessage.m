@@ -19,15 +19,46 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, TSOutgoingMessageState) {
+    // The message is either:
+    // a) Enqueued for sending.
+    // b) Waiting on attachment upload(s).
+    // c) Being sent to the service.
+    TSOutgoingMessageStateAttemptingOut,
+    // The failure state.
+    TSOutgoingMessageStateUnsent,
+    // These two enum values have been combined into TSOutgoingMessageStateSentToService.
+    TSOutgoingMessageStateSent_OBSOLETE,
+    TSOutgoingMessageStateDelivered_OBSOLETE,
+    // The message has been sent to the service.
+    TSOutgoingMessageStateSentToService,
+};
+
 NSString *const kTSOutgoingMessageSentRecipientAll = @"kTSOutgoingMessageSentRecipientAll";
+
+@interface TSOutgoingMessageRecipientState ()
+
+@property (atomic) OWSOutgoingMessageState state;
+@property (atomic, nullable) NSNumber *deliveredTimestamp;
+@property (atomic, nullable) NSNumber *readTimestamp;
+
+@end
+
+#pragma mark -
+
+@implementation TSOutgoingMessageRecipientState
+
+@end
+
+#pragma mark -
 
 @interface TSOutgoingMessage ()
 
-@property (atomic) TSOutgoingMessageState messageState;
+//@property (atomic) TSOutgoingMessageState messageState;
 @property (atomic) BOOL hasSyncedTranscript;
 @property (atomic) NSString *customMessage;
 @property (atomic) NSString *mostRecentFailureText;
-@property (atomic) BOOL wasDelivered;
+//@property (atomic) BOOL wasDelivered;
 @property (atomic) NSString *singleGroupRecipient;
 @property (atomic) BOOL isFromLinkedDevice;
 
@@ -36,15 +67,17 @@ NSString *const kTSOutgoingMessageSentRecipientAll = @"kTSOutgoingMessageSentRec
 //
 // This collection can also be tested to avoid repeat delivery to the
 // same recipient.
-@property (atomic) NSArray<NSString *> *sentRecipients;
+//@property (atomic) NSArray<NSString *> *sentRecipients;
 
 @property (atomic) TSGroupMetaMessage groupMetaMessage;
 
-@property (atomic) NSDictionary<NSString *, NSNumber *> *recipientDeliveryMap;
+//@property (atomic) NSDictionary<NSString *, NSNumber *> *recipientDeliveryMap;
+//
+//@property (atomic) NSDictionary<NSString *, NSNumber *> *recipientReadMap;
 
-@property (atomic) NSDictionary<NSString *, NSNumber *> *recipientReadMap;
-
-@property (atomic, nullable) NSSet<NSString *> *intendedRecipientIds;
+@property (atomic, nullable) NSDictionary<NSString *, TSOutgoingMessageRecipientState *> *recipientStateMap;
+//
+//@property (atomic, nullable) NSSet<NSString *> *intendedRecipientIds;
 
 @end
 
@@ -52,7 +85,7 @@ NSString *const kTSOutgoingMessageSentRecipientAll = @"kTSOutgoingMessageSentRec
 
 @implementation TSOutgoingMessage
 
-@synthesize sentRecipients = _sentRecipients;
+//@synthesize sentRecipients = _sentRecipients;
 
 - (instancetype)initWithCoder:(NSCoder *)coder
 {
@@ -63,19 +96,66 @@ NSString *const kTSOutgoingMessageSentRecipientAll = @"kTSOutgoingMessageSentRec
             _attachmentFilenameMap = [NSMutableDictionary new];
         }
         
-        // Migrate message state.
-        if (_messageState == TSOutgoingMessageStateSent_OBSOLETE) {
-            _messageState = TSOutgoingMessageStateSentToService;
-        } else if (_messageState == TSOutgoingMessageStateDelivered_OBSOLETE) {
-            _messageState = TSOutgoingMessageStateSentToService;
-            _wasDelivered = YES;
-        }
-        if (!_sentRecipients) {
-            _sentRecipients = [NSArray new];
+        if (!self.recipientStateMap) {
+            [self migrateRecipientStateMapWithCoder:coder];
+            OWSAssert(self.recipientStateMap);
         }
     }
 
     return self;
+}
+
+- (void)migrateRecipientStateMapWithCoder:(NSCoder *)coder
+{
+    OWSAssert(!self.recipientStateMap);
+    OWSAssert(coder);
+
+    // Migrate message state.
+    TSOutgoingMessageState oldMessageState = TSOutgoingMessageStateUnsent;
+    NSNumber *_Nullable messageStateValue = [coder decodeObjectForKey:@"messageState"];
+    if (messageStateValue) {
+        oldMessageState = (TSOutgoingMessageState) messageStateValue.intValue;
+    }
+    
+    OWSOutgoingMessageState defaultState;
+    switch (oldMessageState) {
+        case TSOutgoingMessageStateUnsent:
+            defaultState = OWSOutgoingMessageStateFailed;
+            break;
+        case TSOutgoingMessageStateAttemptingOut:
+            defaultState = OWSOutgoingMessageStateSending;
+            break;
+        case TSOutgoingMessageStateSentToService:
+        case TSOutgoingMessageStateSent_OBSOLETE:
+        case TSOutgoingMessageStateDelivered_OBSOLETE:
+            // Convert legacy values.
+            defaultState = OWSOutgoingMessageStateSentToService;
+            break;
+    }
+    
+    NSDictionary<NSString *, NSNumber *> *_Nullable recipientDeliveryMap = [coder decodeObjectForKey:@"recipientDeliveryMap"];
+    NSDictionary<NSString *, NSNumber *> *_Nullable recipientReadMap = [coder decodeObjectForKey:@"recipientReadMap"];
+    
+    NSMutableDictionary<NSString *, TSOutgoingMessageRecipientState *> *recipientStateMap = [NSMutableDictionary new];
+    NSArray<NSString *> *recipientIds = [self.thread recipientIdentifiers];
+    for (NSString *recipientId in recipientIds) {
+        TSOutgoingMessageRecipientState *recipientState = [TSOutgoingMessageRecipientState new];
+        
+        NSNumber *_Nullable readTimestamp = recipientReadMap[recipientId];
+        NSNumber *_Nullable deliveredTimestamp = recipientDeliveryMap[recipientId];
+        if (readTimestamp) {
+            recipientState.state = OWSOutgoingMessageStateReadByRecipient;
+            recipientState.readTimestamp = readTimestamp;
+        } else if (deliveredTimestamp) {
+            recipientState.state = OWSOutgoingMessageStateDeliveredToRecipient;
+            recipientState.deliveredTimestamp = deliveredTimestamp;
+        } else {
+            recipientState.state = defaultState;
+        }
+        
+        recipientStateMap[recipientId] = recipientState;
+    }
+    self.recipientStateMap = [recipientStateMap copy];
 }
 
 + (instancetype)outgoingMessageInThread:(nullable TSThread *)thread
@@ -161,13 +241,20 @@ NSString *const kTSOutgoingMessageSentRecipientAll = @"kTSOutgoingMessageSentRec
         return self;
     }
 
-    _messageState = TSOutgoingMessageStateAttemptingOut;
-    _sentRecipients = [NSArray new];
     _hasSyncedTranscript = NO;
     _groupMetaMessage = groupMetaMessage;
     _isVoiceMessage = isVoiceMessage;
 
     _attachmentFilenameMap = [NSMutableDictionary new];
+
+    NSMutableDictionary<NSString *, TSOutgoingMessageRecipientState *> *recipientStateMap = [NSMutableDictionary new];
+    NSArray<NSString *> *recipientIds = [self.thread recipientIdentifiers];
+    for (NSString *recipientId in recipientIds) {
+        TSOutgoingMessageRecipientState *recipientState = [TSOutgoingMessageRecipientState new];
+        recipientState.state = OWSOutgoingMessageStateSending;
+        recipientStateMap[recipientId] = recipientState;
+    }
+    self.recipientStateMap = [recipientStateMap copy];
 
     return self;
 }
@@ -194,18 +281,39 @@ NSString *const kTSOutgoingMessageSentRecipientAll = @"kTSOutgoingMessageSentRec
     [super saveWithTransaction:transaction];
 }
 
+- (OWSOutgoingMessageState)maxMessageState
+{
+    OWSOutgoingMessageState result = OWSOutgoingMessageStateMin;
+    for (TSOutgoingMessageRecipientState *recipientState in self.recipientStateMap.allValues) {
+        result = MAX(recipientState.state, result);
+    }
+    return result;
+}
+
+- (OWSOutgoingMessageState)minMessageState
+{
+    OWSOutgoingMessageState result = OWSOutgoingMessageStateMax;
+    for (TSOutgoingMessageRecipientState *recipientState in self.recipientStateMap.allValues) {
+        result = MIN(recipientState.state, result);
+    }
+    return result;
+}
+
 - (BOOL)shouldStartExpireTimer:(YapDatabaseReadTransaction *)transaction
 {
-    switch (self.messageState) {
-        case TSOutgoingMessageStateSentToService:
-            return self.isExpiringMessage;
-        case TSOutgoingMessageStateAttemptingOut:
-        case TSOutgoingMessageStateUnsent:
-            return NO;
-        case TSOutgoingMessageStateSent_OBSOLETE:
-        case TSOutgoingMessageStateDelivered_OBSOLETE:
-            OWSFail(@"%@ Obsolete message state.", self.logTag);
-            return self.isExpiringMessage;
+    // It's not clear if we should wait until _all_ recipients have reached "sent or later"
+    // (which could never occur if one group member is unregistered) or only wait until
+    // the first recipient has reached "sent or later" (which could cause partially delivered
+    // messages to expire).  For now, we'll do the latter.
+    //
+    // TODO: Revisit this decision.
+    
+    if (!self.isExpiringMessage) {
+        return NO;
+    } else if (self.recipientStateMap.count < 1) {
+        return YES;
+    } else {
+        return self.maxMessageState >= OWSOutgoingMessageStateSentToService;
     }
 }
 
@@ -228,29 +336,52 @@ NSString *const kTSOutgoingMessageSentRecipientAll = @"kTSOutgoingMessageSentRec
     [self.dbReadWriteConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
         [self applyChangeToSelfAndLatestCopy:transaction
                                  changeBlock:^(TSOutgoingMessage *message) {
-                                     [message setMessageState:TSOutgoingMessageStateUnsent];
+                                     // Mark any "sending" recipients as "failed."
+                                     for (TSOutgoingMessageRecipientState *recipientState in message.recipientStateMap.allValues) {
+                                         if (recipientState.state == OWSOutgoingMessageStateSending) {
+                                             recipientState.state = OWSOutgoingMessageStateFailed;
+                                         }
+                                     }
                                      [message setMostRecentFailureText:error.localizedDescription];
                                  }];
     }];
 }
 
-- (void)updateWithMessageState:(TSOutgoingMessageState)messageState
+- (void)updateWithRecipientState:(OWSOutgoingMessageState)state
+                     recipientId:(NSString *)recipientId
+                     transaction:(YapDatabaseReadWriteTransaction *)transaction
 {
-    [self.dbReadWriteConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-        [self updateWithMessageState:messageState transaction:transaction];
-    }];
-}
-
-- (void)updateWithMessageState:(TSOutgoingMessageState)messageState
-                   transaction:(YapDatabaseReadWriteTransaction *)transaction
-{
+    OWSAssert(recipientId.length > 0);
     OWSAssert(transaction);
-
+    
     [self applyChangeToSelfAndLatestCopy:transaction
                              changeBlock:^(TSOutgoingMessage *message) {
-                                 [message setMessageState:messageState];
+                                 TSOutgoingMessageRecipientState *_Nullable recipientState = message.recipientStateMap[recipientId];
+                                 if (!recipientState) {
+                                     OWSFail(@"%@ Missing recipient state for recipient: %@", self.logTag, recipientId);
+                                     return;
+                                 }
+                                 recipientState.state = state;
                              }];
 }
+
+//- (void)updateWithMessageState:(TSOutgoingMessageState)messageState
+//{
+//    [self.dbReadWriteConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+//        [self updateWithMessageState:messageState transaction:transaction];
+//    }];
+//}
+//
+//- (void)updateWithMessageState:(TSOutgoingMessageState)messageState
+//                   transaction:(YapDatabaseReadWriteTransaction *)transaction
+//{
+//    OWSAssert(transaction);
+//
+//    [self applyChangeToSelfAndLatestCopy:transaction
+//                             changeBlock:^(TSOutgoingMessage *message) {
+//                                 [message setMessageState:messageState];
+//                             }];
+//}
 
 - (void)updateWithHasSyncedTranscript:(BOOL)hasSyncedTranscript
                           transaction:(YapDatabaseReadWriteTransaction *)transaction
@@ -288,16 +419,13 @@ NSString *const kTSOutgoingMessageSentRecipientAll = @"kTSOutgoingMessageSentRec
 
     [self applyChangeToSelfAndLatestCopy:transaction
                              changeBlock:^(TSOutgoingMessage *message) {
-
-                                 if (deliveryTimestamp) {
-                                     NSMutableDictionary<NSString *, NSNumber *> *recipientDeliveryMap
-                                         = (message.recipientDeliveryMap ? [message.recipientDeliveryMap mutableCopy]
-                                                                         : [NSMutableDictionary new]);
-                                     recipientDeliveryMap[recipientId] = deliveryTimestamp;
-                                     message.recipientDeliveryMap = [recipientDeliveryMap copy];
+                                 TSOutgoingMessageRecipientState *_Nullable recipientState = message.recipientStateMap[recipientId];
+                                 if (!recipientState) {
+                                     OWSFail(@"%@ Missing recipient state for delivered recipient: %@", self.logTag, recipientId);
+                                     return;
                                  }
-
-                                 [message setWasDelivered:YES];
+                                 recipientState.state = OWSOutgoingMessageStateDeliveredToRecipient;
+                                 recipientState.deliveredTimestamp = deliveryTimestamp;
                              }];
 }
 

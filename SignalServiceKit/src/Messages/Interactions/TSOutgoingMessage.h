@@ -6,19 +6,23 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef NS_ENUM(NSInteger, TSOutgoingMessageState) {
+typedef NS_ENUM(NSInteger, OWSOutgoingMessageState) {
+    // The failure state.
+    OWSOutgoingMessageStateFailed = 0,
     // The message is either:
     // a) Enqueued for sending.
     // b) Waiting on attachment upload(s).
     // c) Being sent to the service.
-    TSOutgoingMessageStateAttemptingOut,
-    // The failure state.
-    TSOutgoingMessageStateUnsent,
-    // These two enum values have been combined into TSOutgoingMessageStateSentToService.
-    TSOutgoingMessageStateSent_OBSOLETE,
-    TSOutgoingMessageStateDelivered_OBSOLETE,
+    OWSOutgoingMessageStateSending,
+    // The message was not sent because the recipient is not valid.
+    OWSOutgoingMessageStateSkipped,
     // The message has been sent to the service.
-    TSOutgoingMessageStateSentToService,
+    OWSOutgoingMessageStateSentToService,
+    OWSOutgoingMessageStateDeliveredToRecipient,
+    OWSOutgoingMessageStateReadByRecipient,
+    
+    OWSOutgoingMessageStateMin = OWSOutgoingMessageStateFailed,
+    OWSOutgoingMessageStateMax = OWSOutgoingMessageStateReadByRecipient,
 };
 
 typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
@@ -34,6 +38,16 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
 @class OWSSignalServiceProtosContentBuilder;
 @class OWSSignalServiceProtosDataMessageBuilder;
 @class SignalRecipient;
+
+@interface TSOutgoingMessageRecipientState : NSObject
+
+@property (atomic, readonly) OWSOutgoingMessageState state;
+@property (atomic, nullable, readonly) NSNumber *deliveredTimestamp;
+@property (atomic, nullable, readonly) NSNumber *readTimestamp;
+
+@end
+
+#pragma mark -
 
 @interface TSOutgoingMessage : TSMessage
 
@@ -75,11 +89,11 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
 + (instancetype)outgoingMessageInThread:(nullable TSThread *)thread
                        groupMetaMessage:(TSGroupMetaMessage)groupMetaMessage;
 
-@property (atomic, readonly) TSOutgoingMessageState messageState;
-
-// The message has been sent to the service and received by at least one recipient client.
-// A recipient may have more than one client, and group message may have more than one recipient.
-@property (atomic, readonly) BOOL wasDelivered;
+//@property (atomic, readonly) TSOutgoingMessageState messageState;
+//
+//// The message has been sent to the service and received by at least one recipient client.
+//// A recipient may have more than one client, and group message may have more than one recipient.
+//@property (atomic, readonly) BOOL wasDelivered;
 
 @property (atomic, readonly) BOOL hasSyncedTranscript;
 @property (atomic, readonly) NSString *customMessage;
@@ -97,14 +111,19 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
 // This property won't be accurate for legacy messages.
 @property (atomic, readonly) BOOL isFromLinkedDevice;
 
-// Map of "recipient id"-to-"delivery time" of the recipients who have received the message.
-@property (atomic, readonly) NSDictionary<NSString *, NSNumber *> *recipientDeliveryMap;
+//// Map of "recipient id"-to-"delivery time" of the recipients who have received the message.
+//@property (atomic, readonly) NSDictionary<NSString *, NSNumber *> *recipientDeliveryMap;
+//
+//// Map of "recipient id"-to-"read time" of the recipients who have read the message.
+//@property (atomic, readonly) NSDictionary<NSString *, NSNumber *> *recipientReadMap;
 
-// Map of "recipient id"-to-"read time" of the recipients who have read the message.
-@property (atomic, readonly) NSDictionary<NSString *, NSNumber *> *recipientReadMap;
+// Map of "recipient id"-to-"recipient state".
+//
+// This map is nil until the first time the message is enqueued for sending.
+@property (atomic, nullable, readonly) NSDictionary<NSString *, TSOutgoingMessageRecipientState *> *recipientStateMap;
 
-// List of all recipients, captured the first time we enqueue the message to be sent.
-@property (atomic, readonly, nullable) NSSet<NSString *> *intendedRecipientIds;
+//// List of all recipients, captured the first time we enqueue the message to be sent.
+//@property (atomic, readonly, nullable) NSSet<NSString *> *intendedRecipientIds;
 
 @property (nonatomic, readonly) BOOL isSilent;
 
@@ -143,8 +162,11 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
 
 #pragma mark - Update With... Methods
 
-- (void)updateWithMessageState:(TSOutgoingMessageState)messageState;
-- (void)updateWithMessageState:(TSOutgoingMessageState)messageState
+- (void)updateWithRecipientState:(OWSOutgoingMessageState)state
+                     recipientId:(NSString *)recipientId
+                     transaction:(YapDatabaseReadWriteTransaction *)transaction;
+//- (void)updateWithMessageState:(TSOutgoingMessageState)messageState;
+//- (void)updateWithMessageState:(TSOutgoingMessageState)messageState
                    transaction:(YapDatabaseReadWriteTransaction *)transaction;
 - (void)updateWithSendingError:(NSError *)error;
 - (void)updateWithHasSyncedTranscript:(BOOL)hasSyncedTranscript
